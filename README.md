@@ -1,8 +1,65 @@
-# ctf-management-bot
+<a id="readme-top"></a>
+
+<div align="center">
+  <img src="docs/assets/banner.png" alt="CTF Management Bot — 참가, 문제 채널, 작업 상태와 풀이 완료를 Discord에서 관리" width="100%">
+
+  <h1>ctf-management-bot</h1>
+  <p><strong>참가부터 풀이 완료까지, 팀의 CTF 진행 상황을 한곳에서.</strong></p>
+  <p>
+    <a href="#getting-started"><strong>설치 시작하기 »</strong></a>
+    <br><br>
+    <a href="#configuration">처음 설정할 값</a> ·
+    <a href="#usage">명령어 안내</a> ·
+    <a href="https://github.com/RatelXD/ctf-management-bot/issues">버그 제보 · 기능 제안</a>
+  </p>
+  <p>
+    <a href="https://github.com/RatelXD/ctf-management-bot/actions/workflows/tests.yml"><img src="https://github.com/RatelXD/ctf-management-bot/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+    <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&amp;logoColor=white" alt="Python 3.11 이상"></a>
+    <a href="https://discordpy.readthedocs.io/"><img src="https://img.shields.io/badge/discord.py-2.x-5865F2?logo=discord&amp;logoColor=white" alt="discord.py 2.x"></a>
+    <a href="https://www.sqlite.org/"><img src="https://img.shields.io/badge/Storage-SQLite-4AA5B5?logo=sqlite&amp;logoColor=white" alt="SQLite 저장"></a>
+    <a href="https://github.com/RatelXD/ctf-management-bot/stargazers"><img src="https://img.shields.io/github/stars/RatelXD/ctf-management-bot?style=flat" alt="GitHub stars"></a>
+  </p>
+</div>
+
+<details>
+  <summary><strong>목차 · 필요한 곳으로 바로 이동</strong></summary>
+
+  - [프로젝트 소개](#about-the-project)
+  - [처음 설정할 값](#configuration)
+  - [설치와 실행](#getting-started)
+  - [대회 만들기](#create-event)
+  - [문제와 풀이 관리](#usage)
+  - [저장과 운영](#operations)
+  - [무료 실행 방법](#hosting)
+  - [검증](#testing)
+  - [기여와 문의](#contributing)
+  - [참고한 자료](#acknowledgments)
+
+</details>
+
+<a id="about-the-project"></a>
+
+## 프로젝트 소개
 
 CTF 참가 버튼, 문제별 채널, 참가자별 작업 상태와 풀이 현황을 관리하는 Discord 봇입니다. 관리 권한이 있는 기존 Discord 서버에 초대해 사용할 수 있으며, 내 PC에서 실행할 수 있습니다.
 
 **대회명은 사용자가 `/setup_ctf`에서 정합니다.** 특정 대회나 참가 역할이 코드에 고정되어 있지 않습니다. 아래의 `my-ctf`는 예시이므로 운영할 대회명으로 바꾸세요.
+
+| 참가 관리 | 문제별 협업 | 풀이 현황 |
+| --- | --- | --- |
+| 버튼 하나로 참가·탈퇴 | 문제 채널과 생성자 기록 | 해결자만 남는 `#status` 현황판 |
+| 역할로 카테고리 표시·숨김 | 🔨 푸는 중 · 🆘 도움 요청 | 완료 알림과 🚩 채널명 |
+| 재시작 후에도 버튼 유지 | 참여자별 작업 상태 관리 | SQLite로 기록 보존 |
+
+<p align="center">
+  <img src="docs/assets/workflow.png" alt="대회 설정 → 참가 버튼 → 문제 추가와 작업 상태 등록 → 풀이 완료" width="100%">
+</p>
+
+**기술 구성:** Python 3.11+ · discord.py 2.x · SQLite · Docker Compose(선택)
+
+<p align="right"><a href="#readme-top">맨 위로 ↑</a></p>
+
+<a id="configuration"></a>
 
 ## 처음 설정할 값 한눈에 보기
 
@@ -34,7 +91,21 @@ CTF 참가 버튼, 문제별 채널, 참가자별 작업 상태와 풀이 현황
 
 설정 순서: **① 봇 생성·초대 → ② `.env` 작성·봇 실행 → ③ Discord에서 `/setup_ctf` → ④ 참가 버튼 → ⑤ 문제 추가**
 
-## 1. 봇 생성과 초대
+<p align="right"><a href="#readme-top">맨 위로 ↑</a></p>
+
+<a id="getting-started"></a>
+
+## 설치와 실행
+
+### 준비물
+
+| 준비물 | 용도 |
+| --- | --- |
+| Python 3.11 이상 · Git | 코드 다운로드와 봇 실행 |
+| 관리 권한이 있는 Discord 서버 | 봇 초대와 대회 생성 |
+| Discord 애플리케이션과 봇 토큰 | Discord API 연결 |
+
+### 1. 봇 생성과 초대
 
 1. [Discord Developer Portal](https://discord.com/developers/applications)에서 **New Application**을 만들고 Bot 메뉴에서 봇 토큰을 발급합니다.
 2. Installation 또는 OAuth2 URL Generator에서 **서버 설치(Guild Install)**, `bot`, `applications.commands`를 선택합니다.
@@ -44,7 +115,7 @@ CTF 참가 버튼, 문제별 채널, 참가자별 작업 상태와 풀이 현황
 
 Message Content Intent, Server Members Intent 등 privileged intent는 켤 필요가 없습니다. 토큰은 `.env`에만 보관하고 공개 저장소에 올리지 마세요. 기존 사용자 계정 토큰은 사용하지 않습니다.
 
-## 2. Windows에서 실행
+### 2. Windows에서 실행
 
 Python 3.11 이상과 Git을 설치한 뒤 PowerShell에서 프로젝트를 내려받습니다. 이미 다운로드했다면 해당 폴더에서 다음 설치 단계부터 진행하세요.
 
@@ -78,7 +149,11 @@ DATABASE_PATH=data/ctf.sqlite3
 
 Ready 로그가 나오면 Discord에서 아래 설정 명령을 실행합니다. PowerShell 창을 닫거나 PC를 끄면 봇도 꺼집니다. 공개 IP, 포트 포워딩, 웹 도메인은 필요 없습니다.
 
-## 3. 대회 생성
+<p align="right"><a href="#readme-top">맨 위로 ↑</a></p>
+
+<a id="create-event"></a>
+
+## 대회 만들기
 
 서버 관리(Manage Server) 권한이 있는 사람이 **Discord 서버의 텍스트 채널에서** `/setup_ctf`를 선택하고 네 옵션을 입력합니다. 터미널에 입력하는 명령이 아닙니다.
 
@@ -103,7 +178,11 @@ Ready 로그가 나오면 Discord에서 아래 설정 명령을 실행합니다.
 
 버튼을 누르면 **그 사람에게만 보이는 응답**과 함께 역할을 부여합니다. 다시 누르면 역할을 회수하고 떠났다고 응답합니다. 카테고리와 문제 채널은 참가자에게 보였다가 숨겨집니다. 채널이나 기록을 삭제하지 않으므로 다른 참가자에게 영향이 없습니다. Discord의 Administrator 권한이 있는 사람과 서버 소유자는 권한 우회로 카테고리를 계속 볼 수 있습니다.
 
-## 4. 문제와 풀이 관리
+<p align="right"><a href="#readme-top">맨 위로 ↑</a></p>
+
+<a id="usage"></a>
+
+## 문제와 풀이 관리
 
 먼저 참가 버튼을 누른 뒤 **해당 대회의 `#status` 또는 `#announcements`에서** 실행합니다.
 
@@ -140,7 +219,11 @@ Ready 로그가 나오면 Discord에서 아래 설정 명령을 실행합니다.
 
 상태판은 보통 5초 안에 반영됩니다. 채널 이름 변경은 Discord의 별도 rate limit에 걸리면 수 분 늦어질 수 있습니다. 상태판과 명령 응답은 이름 변경을 기다리지 않습니다. 상태판·참가 메시지를 지운 경우 다음 상태 변경 또는 봇 재시작 때 다시 생성합니다.
 
-## 5. 저장과 운영
+<p align="right"><a href="#readme-top">맨 위로 ↑</a></p>
+
+<a id="operations"></a>
+
+## 저장과 운영
 
 SQLite `data/ctf.sqlite3`에 대회 ID, 채널 ID, 생성자, 작업 상태, 해결자, 플래그, 메시지 ID를 저장합니다. 재시작 후에도 참가 버튼이 동작합니다. **봇 인스턴스는 하나만 실행**하세요. 백업은 봇을 종료한 뒤 `data` 폴더를 복사하면 됩니다. 카테고리·역할·문제 채널을 Discord에서 수동 삭제하는 경우 자동 복원하지 않으므로 삭제하지 마세요. `/unsolve_ch`는 기존 채팅의 완료 알림을 지우지 않습니다.
 
@@ -153,7 +236,27 @@ docker compose logs -f
 
 데이터를 호스트의 `./data` 폴더에 보관하고 재부팅 후 자동 재시작하도록 설정했습니다.
 
-## 6. 무료 실행 방법
+<details>
+<summary><strong>폴더 구성</strong></summary>
+
+```text
+ctf-management-bot/
+├── bot.py                      # Discord 명령어 · 버튼 · 상태판
+├── core.py                     # 상태 관리 · SQLite 저장
+├── .env.example                # 복사해서 사용할 환경 설정 예시
+├── compose.yaml                # Docker 실행 설정
+├── docs/assets/                # README 배너와 사용 흐름 그림
+├── scripts/render_readme_assets.py  # 그림 재생성 도구 (Pillow 필요)
+└── tests/                      # 상태 전이 · 명령어 · 버튼 테스트
+```
+
+</details>
+
+<p align="right"><a href="#readme-top">맨 위로 ↑</a></p>
+
+<a id="hosting"></a>
+
+## 무료 실행 방법
 
 2026-11-01 공식 문서 확인 기준:
 
@@ -162,6 +265,10 @@ docker compose logs -f
 - **Render 무료 Web Service:** [공식 제한](https://render.com/docs/free)에 따르면 유휴 중단과 로컬 SQLite 소실이 있습니다. 이 봇은 지속 실행 프로세스와 영속 디스크가 필요하므로 그대로 올릴 배포 대상에 맞지 않습니다. 무료 Background Worker도 제공하지 않습니다.
 
 그 밖의 호스팅을 선택할 때는 일반 Python 프로세스 또는 Docker 컨테이너를 상시 실행하고 데이터 폴더를 유지할 수 있는지 확인하세요.
+
+<p align="right"><a href="#readme-top">맨 위로 ↑</a></p>
+
+<a id="testing"></a>
 
 ## 검증
 
@@ -178,3 +285,25 @@ docker compose logs -f
 5. 봇 재시작 후 기존 참가 버튼과 상태판 유지
 
 실제 Discord API 연동은 봇 토큰과 테스트 서버가 있어야 검증할 수 있습니다.
+
+<p align="right"><a href="#readme-top">맨 위로 ↑</a></p>
+
+<a id="contributing"></a>
+
+## 기여와 문의
+
+버그는 [Issues](https://github.com/RatelXD/ctf-management-bot/issues)에 실행 환경과 재현 방법을 함께 남겨 주세요. 기능 제안도 같은 곳에서 받습니다. 코드 변경은 저장소를 Fork한 뒤 브랜치를 만들어 Pull Request로 제안할 수 있습니다.
+
+프로젝트 관리: [@RatelXD](https://github.com/RatelXD) · [저장소](https://github.com/RatelXD/ctf-management-bot)
+
+<a id="acknowledgments"></a>
+
+## 참고한 자료
+
+- [Best-README-Template](https://github.com/othneildrew/Best-README-Template) — 중앙 헤더, 배지, 접이식 목차와 섹션 구성
+- [discord.py](https://discordpy.readthedocs.io/) — Discord 봇 라이브러리
+- [Shields.io](https://shields.io/) — README 기술 배지
+
+배너와 사용 흐름 그림은 이 프로젝트를 위해 제작했습니다. 배너 속 화면은 기능을 설명하기 위한 예시입니다.
+
+<p align="right"><a href="#readme-top">맨 위로 ↑</a></p>
