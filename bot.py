@@ -166,23 +166,25 @@ class CTFBot(commands.Bot):
                 await self.remove_event(event)
 
     async def migrate_layout(self, guild, category, event):
-        if event.get("layout_version") == 1:
+        if event.get("layout_version") == 2:
             return
         await category.edit(name=f"⚔️{event['name']}⚔️", reason="CTF layout update")
         announcement = guild.get_channel(event["announcements"])
         dashboard = guild.get_channel(event["status"])
         if not isinstance(announcement, discord.TextChannel) or not isinstance(dashboard, discord.TextChannel):
             raise ValueError("CTF 기본 채널이 삭제되었습니다.")
-        await announcement.edit(name="announcement", reason="CTF layout update")
-        await dashboard.edit(name="dashboard", topic=None,
+        await announcement.edit(name="📢│announcements", reason="CTF layout update")
+        await dashboard.edit(name="📊│dashboard", topic=None,
                              overwrites=dashboard_overwrites(guild, dashboard.overwrites),
                              reason="CTF read-only dashboard")
         general = guild.get_channel(event.get("general", 0))
         if general is None:
-            general = next((c for c in category.text_channels if c.name == "general"), None)
+            general = next((c for c in category.text_channels if c.name in ("general", "💬│general")), None)
         if general is None:
-            general = await guild.create_text_channel("general", category=category)
-        event.update(general=general.id, layout_version=1)
+            general = await guild.create_text_channel("💬│general", category=category)
+        else:
+            await general.edit(name="💬│general", reason="CTF layout update")
+        event.update(general=general.id, layout_version=2)
         self.store.save_event(event)
 
     async def sync_name(self, channel_id):
@@ -351,11 +353,11 @@ class CTFCommands(commands.Cog):
                 }
                 category = await guild.create_category(f"⚔️{name}⚔️", overwrites=overwrites)
                 created.append(category)
-                announcements = await guild.create_text_channel("announcement", category=category)
+                announcements = await guild.create_text_channel("📢│announcements", category=category)
                 created.append(announcements)
-                status = await guild.create_text_channel("dashboard", category=category, overwrites=dashboard_overwrites(guild, category.overwrites))
+                status = await guild.create_text_channel("📊│dashboard", category=category, overwrites=dashboard_overwrites(guild, category.overwrites))
                 created.append(status)
-                general = await guild.create_text_channel("general", category=category)
+                general = await guild.create_text_channel("💬│general", category=category)
                 created.append(general)
                 join = next((c for c in guild.text_channels if c.name == "ctf-join" and c.category_id is None), None)
                 if join is None:
@@ -367,7 +369,7 @@ class CTFCommands(commands.Cog):
                     created.append(join)
                 event = dict(id=category.id, guild=guild.id, slug=slug, name=name, start=begin, end=finish,
                              url=url, role=role.id, status=status.id, announcements=announcements.id, join=join.id,
-                             general=general.id, layout_version=1)
+                             general=general.id, layout_version=2)
                 self.bot.store.save_event(event)
             except Exception:
                 for resource in reversed(created):

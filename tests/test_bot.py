@@ -241,7 +241,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(guild.create_category.call_args.args[0], "⚔️My CTF⚔️")
         calls = guild.create_text_channel.call_args_list
         self.assertEqual([call.args[0] for call in calls],
-                         ["announcement", "dashboard", "general", "ctf-join"])
+                         ["📢│announcements", "📊│dashboard", "💬│general", "ctf-join"])
         self.assertFalse(calls[1].kwargs["overwrites"][participant].send_messages)
         self.assertNotIn("topic", calls[1].kwargs)
         self.assertEqual(self.bot.store.event(9)["general"], 22)
@@ -259,13 +259,34 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             create_text_channel=AsyncMock(return_value=SimpleNamespace(id=7)))
         await self.bot.migrate_layout(guild, category, self.event)
         category.edit.assert_awaited_once_with(name="⚔️hitcon2026⚔️", reason="CTF layout update")
-        self.assertEqual(dashboard.edit.call_args.kwargs["name"], "dashboard")
+        self.assertEqual(dashboard.edit.call_args.kwargs["name"], "📊│dashboard")
         self.assertIsNone(dashboard.edit.call_args.kwargs["topic"])
-        self.assertEqual(announcement.edit.call_args.kwargs["name"], "announcement")
+        self.assertEqual(announcement.edit.call_args.kwargs["name"], "📢│announcements")
         self.assertEqual(self.bot.store.event(1)["general"], 7)
         await self.bot.migrate_layout(guild, category, self.event)
         guild.create_text_channel.assert_awaited_once()
         self.assertIn("\n봇은 정답을 검증하지 않습니다.", HELP)
+
+    async def test_version_one_layout_renames_existing_general(self):
+        self.event.update(layout_version=1, general=7)
+        category = SimpleNamespace(edit=AsyncMock(), text_channels=[])
+        channels = {}
+        for id in (4, 6, 7):
+            channel = MagicMock(spec=discord.TextChannel)
+            channel.id, channel.edit, channel.overwrites = id, AsyncMock(), {}
+            channels[id] = channel
+        everyone = MagicMock(spec=discord.Role)
+        everyone.permissions = discord.Permissions.none()
+        guild = SimpleNamespace(get_channel=channels.get, default_role=everyone,
+            roles=[everyone], me=MagicMock(spec=discord.Member), create_text_channel=AsyncMock())
+        await self.bot.migrate_layout(guild, category, self.event)
+        self.assertEqual(channels[6].edit.call_args.kwargs["name"], "📢│announcements")
+        self.assertEqual(channels[4].edit.call_args.kwargs["name"], "📊│dashboard")
+        self.assertEqual(channels[7].edit.call_args.kwargs["name"], "💬│general")
+        self.assertEqual(self.bot.store.event(1)["layout_version"], 2)
+        guild.create_text_channel.assert_not_awaited()
+        await self.bot.migrate_layout(guild, category, self.event)
+        channels[7].edit.assert_awaited_once()
 
     async def test_category_delete_cleans_only_its_event(self):
         self.event["join_message"] = 44
