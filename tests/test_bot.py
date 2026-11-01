@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 
-from bot import CTFBot, CTFCommands, JoinView, HELP, dashboard_overwrites, info_embed
+from bot import CTFBot, CTFCommands, JoinView, HELP, dashboard_overwrites, info_embed, report
 
 
 class BotTests(unittest.IsolatedAsyncioTestCase):
@@ -26,6 +26,8 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(commands["solve_challenge"].parameters[0].required)
         self.assertTrue(commands["remove_ctf"].default_permissions.manage_guild)
         self.assertEqual([p.name for p in commands["remove_ctf"].parameters], ["name"])
+        self.assertTrue(commands["remove_ctf"].parameters[0].autocomplete)
+        self.assertFalse(commands["setup_ctf"].parameters[0].autocomplete)
         self.assertEqual([c.value for c in commands["update_status"].parameters[0].choices],
                          ["working", "stuck", "stopped"])
         for command in commands.values():
@@ -42,12 +44,12 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(first, self.bot.persistent_views)
 
     def removal_interaction(self):
-        category = SimpleNamespace(id=1, category_id=None, delete=AsyncMock())
+        category = SimpleNamespace(id=1, name="⚔️hitcon2026⚔️", category_id=None, delete=AsyncMock())
         child = SimpleNamespace(id=4, category_id=1, delete=AsyncMock())
         other = SimpleNamespace(id=20, category_id=8, delete=AsyncMock())
         role = SimpleNamespace(delete=AsyncMock())
         guild = SimpleNamespace(id=2, fetch_channels=AsyncMock(return_value=[category, child, other]),
-                                get_role=lambda _: role)
+                                get_role=lambda _: role, get_channel=lambda id: category if id == 1 else None)
         interaction = SimpleNamespace(guild=guild, response=SimpleNamespace(defer=AsyncMock()),
                                       followup=SimpleNamespace(send=AsyncMock()))
         return interaction, category, child, other, role
@@ -55,7 +57,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
     async def test_remove_ctf_exact_name_and_guild(self):
         interaction, category, child, other, role = self.removal_interaction()
         cog = CTFCommands(self.bot)
-        for name in ("HITCON2026", "hitcon", "hitcon2026 "):
+        for name in ("hitcon", "hitcon2026x", "ctf:999"):
             with self.assertRaisesRegex(ValueError, "일치"):
                 await cog.remove_ctf.callback(cog, interaction, name)
         interaction.guild.id = 999
@@ -64,6 +66,55 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         interaction.guild.fetch_channels.assert_not_awaited()
         category.delete.assert_not_awaited()
         self.assertIsNotNone(self.bot.store.event(1))
+
+    async def test_remove_ctf_accepts_copied_category_and_autocomplete_id(self):
+        interaction, category, *_ = self.removal_interaction()
+        cog = CTFCommands(self.bot)
+        for name in ("⚔️hitcon2026⚔️", "⚔hitcon2026⚔", " HITCON2026 ", "ctf:1"):
+            self.assertEqual(cog.resolve_removal(interaction.guild, name)["id"], 1)
+        category.name = "⚔️test WHS4 CTF⚔️"
+        await cog.remove_ctf.callback(cog, interaction, "⚔️test WHS4 CTF⚔️")
+        self.assertIsNone(self.bot.store.event(1))
+
+    async def test_remove_ctf_autocomplete_matches_and_is_scoped(self):
+        interaction, *_ = self.removal_interaction()
+        interaction.permissions = discord.Permissions(manage_guild=True)
+        self.bot.store.save_event(dict(id=8, guild=999, name="hitcon private"))
+        cog = CTFCommands(self.bot)
+        for query in ("", "hit", "⚔️hitcon⚔️", "hitcn2026"):
+            choices = await cog.remove_ctf_name_autocomplete(interaction, query)
+            self.assertEqual([(c.name, c.value) for c in choices], [("⚔️hitcon2026⚔️", "ctf:1")])
+        # A partial suggestion is never an instruction to delete the closest event.
+        with self.assertRaises(ValueError):
+            cog.resolve_removal(interaction.guild, "hit")
+        interaction.permissions = discord.Permissions.none()
+        self.assertEqual(await cog.remove_ctf_name_autocomplete(interaction, ""), [])
+        interaction.guild = None
+        self.assertEqual(await cog.remove_ctf_name_autocomplete(interaction, ""), [])
+
+    async def test_remove_ctf_autocomplete_limit_and_ambiguous_names(self):
+        interaction, *_ = self.removal_interaction()
+        interaction.permissions = discord.Permissions(manage_guild=True)
+        for id in range(10, 40):
+            self.bot.store.save_event(dict(id=id, guild=2, name=f"CTF {id}"))
+        cog = CTFCommands(self.bot)
+        self.assertEqual(len(await cog.remove_ctf_name_autocomplete(interaction, "")), 25)
+        self.bot.store.save_event(dict(id=50, guild=2, name="HITCON2026"))
+        with self.assertRaisesRegex(ValueError, "여러 개"):
+            cog.resolve_removal(interaction.guild, " Hitcon2026 ")
+        self.assertEqual(cog.resolve_removal(interaction.guild, "ctf:50")["id"], 50)
+
+    async def test_remove_ctf_missing_name_returns_deferred_error(self):
+        from discord import app_commands
+        interaction, *_ = self.removal_interaction()
+        interaction.response.is_done = lambda: True
+        cog = CTFCommands(self.bot)
+        try:
+            await cog.remove_ctf.callback(cog, interaction, "missing")
+        except ValueError as error:
+            await report(interaction, app_commands.CommandInvokeError(cog.remove_ctf, error))
+        interaction.response.defer.assert_awaited_once()
+        self.assertIn("자동완성", interaction.followup.send.call_args.args[0])
 
     async def test_remove_ctf_deletes_resources_and_preserves_other_ctfs(self):
         interaction, category, child, other, role = self.removal_interaction()

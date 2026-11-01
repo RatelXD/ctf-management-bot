@@ -2,7 +2,9 @@
 import asyncio
 import logging
 import os
+import unicodedata
 from collections import defaultdict
+from difflib import SequenceMatcher
 
 import discord
 from discord import app_commands
@@ -12,6 +14,12 @@ from dotenv import load_dotenv
 from core import Store, board_pages, channel_name, event_details, set_status, solve, unsolve
 
 log = logging.getLogger("ctf")
+
+
+def ctf_lookup_name(name):
+    return unicodedata.normalize("NFC", name).replace("\ufe0f", "").strip().strip("⚔").strip().casefold()
+
+
 HELP = ("`/edit_challenge name:문제명` → 문제 채널 생성 (문제 채널에서는 수정)\n"
         "`/update_status status:working` → 🔨 푸는 중\n"
         "`/update_status status:stuck` → 🆘 막힘·도움 필요 SOS\n"
@@ -295,6 +303,28 @@ class CTFCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    def removal_candidates(self, guild):
+        for event in self.bot.store.events():
+            if event["guild"] == guild.id:
+                category = guild.get_channel(event["id"])
+                yield event, category.name if category else f"⚔️{event['name']}⚔️"
+
+    def resolve_removal(self, guild, name):
+        candidates = list(self.removal_candidates(guild))
+        if name.startswith("ctf:"):
+            matches = [event for event, _ in candidates if name == f"ctf:{event['id']}"]
+        else:
+            matches = [event for event, label in candidates if name in (event["name"], label)]
+            if not matches:
+                query = ctf_lookup_name(name)
+                matches = [event for event, label in candidates
+                           if query in (ctf_lookup_name(event["name"]), ctf_lookup_name(label))]
+        if len(matches) > 1:
+            raise ValueError("이름이 같은 CTF가 여러 개입니다. name 자동완성 목록에서 삭제할 대회를 선택해 주세요.")
+        if not matches:
+            raise ValueError("이 서버에 이름이 일치하는 CTF가 없습니다. name 자동완성 목록에서 선택해 주세요.")
+        return matches[0]
+
     def context(self, interaction):
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel):
@@ -386,15 +416,12 @@ class CTFCommands(commands.Cog):
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.describe(name="삭제할 대회 이름 (/setup_ctf에 입력한 이름과 정확히 일치)")
-    async def remove_ctf(self, interaction: discord.Interaction, name: app_commands.Range[str, 1, 80]):
+    @app_commands.describe(name="자동완성에서 CTF 선택 또는 대회명·카테고리명 입력 (⚔️ 포함 가능)")
+    async def remove_ctf(self, interaction: discord.Interaction, name: app_commands.Range[str, 1, 100]):
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
         async with self.bot.locks[("setup", guild.id)]:
-            event = next((e for e in self.bot.store.events()
-                          if e["guild"] == guild.id and e["name"] == name), None)
-            if not event:
-                raise ValueError("이 서버에 이름이 정확히 일치하는 CTF가 없습니다.")
+            event = self.resolve_removal(guild, name)
             async with self.bot.locks[("event", event["id"])]:
                 event = self.bot.store.event(event["id"])
                 if not event:
@@ -432,10 +459,25 @@ class CTFCommands(commands.Cog):
                                      "같은 /remove_ctf name: 명령으로 삭제를 마쳐 주세요.") from error
                 await self.bot.remove_event(event)
         try:
-            await interaction.followup.send(f"**{discord.utils.escape_markdown(name)}** CTF를 삭제했습니다.", ephemeral=True)
+            await interaction.followup.send(f"**{discord.utils.escape_markdown(event['name'])}** CTF를 삭제했습니다.", ephemeral=True)
         except discord.NotFound:
             # The command may have been invoked in one of the deleted channels.
             log.info("Removed CTF %s; interaction channel no longer exists", event["id"])
+
+    @remove_ctf.autocomplete("name")
+    async def remove_ctf_name_autocomplete(self, interaction: discord.Interaction, current: str):
+        if not interaction.guild or not interaction.permissions.manage_guild:
+            return []
+        query = ctf_lookup_name(current)
+        ranked = []
+        for event, label in self.removal_candidates(interaction.guild):
+            names = (ctf_lookup_name(event["name"]), ctf_lookup_name(label))
+            substring = any(query in name for name in names)
+            score = max(SequenceMatcher(None, query, name).ratio() for name in names)
+            if not query or substring or score >= 0.45:
+                ranked.append((not substring, -score, label, event["id"]))
+        return [app_commands.Choice(name=label[:100], value=f"ctf:{event_id}")
+                for _, _, label, event_id in sorted(ranked)[:25]]
 
     @app_commands.command(name="edit_challenge", description="문제 채널 생성 또는 현재 문제의 이름·분야 수정")
     @app_commands.guild_only()
