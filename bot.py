@@ -167,12 +167,34 @@ class CTFBot(commands.Bot):
                 log.warning("Could not remove join card for deleted CTF %s", event["id"])
 
     async def on_guild_channel_delete(self, channel):
+        ch = self.store.challenge(channel.id)
+        if ch:
+            async with self.locks[("event", ch["event"])]:
+                event = self.store.event(ch["event"])
+                if event and event["guild"] == channel.guild.id:
+                    self.forget_challenge(ch)
+            return
         if not isinstance(channel, discord.CategoryChannel):
             return
         async with self.locks[("event", channel.id)]:
             event = self.store.event(channel.id)
             if event and event["guild"] == channel.guild.id:
                 await self.remove_event(event)
+
+    def forget_challenge(self, ch):
+        task = self.rename_tasks.pop(ch["id"], None)
+        if task:
+            task.cancel()
+        self.store.delete_challenge(ch["id"])
+        self.dirty.add(ch["event"])
+
+    async def prune_missing_challenges(self, guild, event):
+        for ch in self.store.challenges(event["id"]):
+            if guild.get_channel(ch["id"]) is None:
+                try:
+                    await guild.fetch_channel(ch["id"])
+                except discord.NotFound:
+                    self.forget_challenge(ch)
 
     async def migrate_layout(self, guild, category, event):
         if event.get("layout_version") == 2:
@@ -244,6 +266,7 @@ class CTFBot(commands.Bot):
                 return
         if event.get("removing"):
             return
+        await self.prune_missing_challenges(guild, event)
         await self.migrate_layout(guild, category, event)
         status = guild.get_channel(event["status"])
         join = guild.get_channel(event["join"])
@@ -488,9 +511,17 @@ class CTFCommands(commands.Cog):
 
     @app_commands.command(name="edit_challenge", description="문제 채널 생성 또는 현재 문제의 이름·분야 수정")
     @app_commands.guild_only()
-    @app_commands.describe(name="문제명 (새 문제 생성 시 필수, 현재 문제 수정 시 생략 가능)", category="분야 (예: web, pwn, crypto)")
+    @app_commands.describe(name="문제명 (새 문제 생성 시 필수, 현재 문제 수정 시 생략 가능)", category="분야 (예: web, pwn, crypto)",
+                           erase="현재 문제 채널 삭제 (관리자 전용, 삭제하려면 True)")
     async def edit_challenge(self, interaction: discord.Interaction, name: app_commands.Range[str, 1, 96] | None = None,
-                      category: app_commands.Range[str, 1, 40] = ""):
+                      category: app_commands.Range[str, 1, 40] = "", erase: bool = False):
+        if erase:
+            if not interaction.user.guild_permissions.manage_guild:
+                raise ValueError("문제 삭제는 서버 관리자만 할 수 있습니다.")
+            if name is not None or category:
+                raise ValueError("문제 삭제 시에는 name·category를 함께 입력하지 말고 erase:True만 사용해 주세요.")
+            await self.erase_challenge(interaction)
+            return
         event = self.context(interaction)
         await interaction.response.defer(ephemeral=True, thinking=True)
         async with self.bot.locks[("event", event["id"])]:
@@ -542,6 +573,29 @@ class CTFCommands(commands.Cog):
             ch["info_message"] = await self.bot.upsert_message(channel, ch.get("info_message"), embed=embed)
             self.bot.store.save_challenge(ch)
         await interaction.followup.send(f"문제를 저장했습니다: {channel.mention}", ephemeral=True)
+
+    async def erase_challenge(self, interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        target = interaction.channel
+        if not isinstance(target, discord.TextChannel):
+            raise ValueError("삭제할 문제 채널을 선택하거나 문제 채널 안에서 사용해 주세요.")
+        ch = self.bot.store.challenge(target.id)
+        event = self.bot.store.event(ch["event"]) if ch else None
+        if not event or event["guild"] != interaction.guild_id or target.guild.id != interaction.guild_id:
+            raise ValueError("이 서버에 등록된 CTF 문제 채널만 삭제할 수 있습니다.")
+        async with self.bot.locks[("event", event["id"])]:
+            ch = self.bot.store.challenge(target.id)
+            if not ch:
+                raise ValueError("이미 삭제된 문제입니다.")
+            try:
+                await target.delete(reason="CTF challenge removed by server manager")
+            except discord.NotFound:
+                pass
+            self.bot.forget_challenge(ch)
+        try:
+            await interaction.followup.send("문제 채널과 기록을 삭제했습니다.", ephemeral=True)
+        except discord.NotFound:
+            log.info("Removed challenge %s; interaction channel no longer exists", target.id)
 
     @app_commands.command(name="update_status", description="현재 문제의 내 작업 상태를 변경합니다")
     @app_commands.guild_only()

@@ -23,7 +23,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         commands = {c.name: c for c in self.bot.tree.get_commands()}
         self.assertEqual(set(commands), {"setup_ctf", "remove_ctf", "edit_challenge", "update_status", "solve_challenge", "unsolve_challenge"})
         self.assertEqual(commands["edit_challenge"].parameters[0].name, "name")
-        self.assertEqual([p.name for p in commands["edit_challenge"].parameters], ["name", "category"])
+        self.assertEqual([p.name for p in commands["edit_challenge"].parameters], ["name", "category", "erase"])
         self.assertFalse(commands["edit_challenge"].parameters[0].required)
         self.assertTrue(commands["solve_challenge"].parameters[0].required)
         self.assertTrue(commands["remove_ctf"].default_permissions.manage_guild)
@@ -44,6 +44,81 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.children[0].custom_id, second.children[0].custom_id)
         self.bot.add_view(first)
         self.assertIn(first, self.bot.persistent_views)
+
+    def problem_removal_interaction(self):
+        channel = MagicMock(spec=discord.TextChannel)
+        channel.id, channel.guild.id = 100, 2
+        channel.delete = AsyncMock()
+        self.bot.store.save_challenge(dict(id=100, event=1, name="demo", workers={}, solver=10))
+        interaction = SimpleNamespace(channel=channel, guild_id=2, user=SimpleNamespace(guild_permissions=discord.Permissions(manage_guild=True)),
+            response=SimpleNamespace(defer=AsyncMock()), followup=SimpleNamespace(send=AsyncMock()))
+        return interaction, channel
+
+    async def test_erase_challenge_deletes_only_selected_problem(self):
+        interaction, channel = self.problem_removal_interaction()
+        self.bot.store.save_challenge(dict(id=101, event=1, name="keep", workers={}, solver=None))
+        cog = CTFCommands(self.bot)
+        await cog.edit_challenge.callback(cog, interaction, erase=True)
+        channel.delete.assert_awaited_once()
+        self.assertIsNone(self.bot.store.challenge(100))
+        self.assertIsNotNone(self.bot.store.challenge(101))
+        self.assertIsNotNone(self.bot.store.event(1))
+        self.assertIn(1, self.bot.dirty)
+        interaction.followup.send.assert_awaited_once()
+
+    async def test_erase_challenge_keeps_state_on_failure(self):
+        interaction, channel = self.problem_removal_interaction()
+        channel.delete.side_effect = discord.Forbidden(MagicMock(status=403, reason="Forbidden"), "denied")
+        cog = CTFCommands(self.bot)
+        with self.assertRaises(discord.Forbidden):
+            await cog.edit_challenge.callback(cog, interaction, erase=True)
+        self.assertIsNotNone(self.bot.store.challenge(100))
+        channel.delete.side_effect = discord.NotFound(MagicMock(status=404, reason="Not Found"), "gone")
+        await cog.edit_challenge.callback(cog, interaction, erase=True)
+        self.assertIsNone(self.bot.store.challenge(100))
+
+    async def test_erase_challenge_permissions_and_scope(self):
+        interaction, channel = self.problem_removal_interaction()
+        cog = CTFCommands(self.bot)
+        interaction.user.guild_permissions = discord.Permissions.none()
+        with self.assertRaisesRegex(ValueError, "관리자"):
+            await cog.edit_challenge.callback(cog, interaction, erase=True)
+        interaction.user.guild_permissions = discord.Permissions(manage_guild=True)
+        with self.assertRaisesRegex(ValueError, "함께"):
+            await cog.edit_challenge.callback(cog, interaction, name="demo", erase=True)
+        interaction.guild_id = 999
+        with self.assertRaises(ValueError):
+            await cog.edit_challenge.callback(cog, interaction, erase=True)
+        interaction.guild_id, channel.id = 2, 4
+        with self.assertRaises(ValueError):
+            await cog.edit_challenge.callback(cog, interaction, erase=True)
+        channel.delete.assert_not_awaited()
+
+    async def test_manual_problem_deletion_cleans_dashboard_state(self):
+        interaction, channel = self.problem_removal_interaction()
+        task = MagicMock()
+        self.bot.rename_tasks[100] = task
+        await self.bot.on_guild_channel_delete(channel)
+        self.assertIsNone(self.bot.store.challenge(100))
+        self.assertIn(1, self.bot.dirty)
+        task.cancel.assert_called_once()
+        self.assertNotIn(100, self.bot.rename_tasks)
+        self.assertIsNotNone(self.bot.store.event(1))
+
+    async def test_offline_problem_deletion_requires_confirmed_not_found(self):
+        self.problem_removal_interaction()
+        guild = SimpleNamespace(get_channel=lambda _: None,
+            fetch_channel=AsyncMock(side_effect=discord.Forbidden(MagicMock(status=403, reason="Forbidden"), "denied")))
+        with self.assertRaises(discord.Forbidden):
+            await self.bot.prune_missing_challenges(guild, self.event)
+        self.assertIsNotNone(self.bot.store.challenge(100))
+        guild.fetch_channel.side_effect = None
+        guild.fetch_channel.return_value = SimpleNamespace(id=100)
+        await self.bot.prune_missing_challenges(guild, self.event)
+        self.assertIsNotNone(self.bot.store.challenge(100))
+        guild.fetch_channel.side_effect = discord.NotFound(MagicMock(status=404, reason="Not Found"), "gone")
+        await self.bot.prune_missing_challenges(guild, self.event)
+        self.assertIsNone(self.bot.store.challenge(100))
 
     def removal_interaction(self):
         category = SimpleNamespace(id=1, name="⚔️hitcon2026⚔️", category_id=None, delete=AsyncMock())

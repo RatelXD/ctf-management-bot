@@ -115,3 +115,7 @@ class Store:
         with self.db:
             self.db.execute("DELETE FROM challenges WHERE event=?", (event,))
             self.db.execute("DELETE FROM events WHERE id=?", (event,))
+
+    def delete_challenge(self, channel: int):
+        with self.db:
+            self.db.execute("DELETE FROM challenges WHERE id=?", (channel,))
