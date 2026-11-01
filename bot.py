@@ -588,8 +588,7 @@ class CTFCommands(commands.Cog):
             self.bot.dirty.add(ch["event"])
             self.bot.queue_name_sync(ch["id"])
         await interaction.channel.send(f"↩️ <@{interaction.user.id}>님이 <#{ch['id']}>의 풀이 완료를 취소했습니다.")
-        await interaction.followup.send("풀이를 취소했습니다. 채널명의 🚩- 제거를 요청했습니다. Discord 이름 변경 제한 중에는 반영이 늦어질 수 있습니다. "
-                                        "다시 /update_status로 작업자를 등록할 수 있습니다.", ephemeral=True)
+        await interaction.followup.send("풀이를 취소했습니다. 다시 /update_status로 작업자를 등록할 수 있습니다.", ephemeral=True)
 
 
 def main():
