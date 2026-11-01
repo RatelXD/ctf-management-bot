@@ -20,10 +20,12 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
     async def test_commands_and_slash_options(self):
         await self.bot.add_cog(CTFCommands(self.bot))
         commands = {c.name: c for c in self.bot.tree.get_commands()}
-        self.assertEqual(set(commands), {"setup_ctf", "edit_challenge", "update_status", "solve_challenge", "unsolve_challenge"})
+        self.assertEqual(set(commands), {"setup_ctf", "remove_ctf", "edit_challenge", "update_status", "solve_challenge", "unsolve_challenge"})
         self.assertEqual(commands["edit_challenge"].parameters[0].name, "name")
         self.assertEqual([p.name for p in commands["edit_challenge"].parameters], ["name", "category"])
         self.assertTrue(commands["solve_challenge"].parameters[0].required)
+        self.assertTrue(commands["remove_ctf"].default_permissions.manage_guild)
+        self.assertEqual([p.name for p in commands["remove_ctf"].parameters], ["name"])
         self.assertEqual([c.value for c in commands["update_status"].parameters[0].choices],
                          ["working", "stuck", "stopped"])
         for command in commands.values():
@@ -38,6 +40,70 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.children[0].custom_id, second.children[0].custom_id)
         self.bot.add_view(first)
         self.assertIn(first, self.bot.persistent_views)
+
+    def removal_interaction(self):
+        category = SimpleNamespace(id=1, category_id=None, delete=AsyncMock())
+        child = SimpleNamespace(id=4, category_id=1, delete=AsyncMock())
+        other = SimpleNamespace(id=20, category_id=8, delete=AsyncMock())
+        role = SimpleNamespace(delete=AsyncMock())
+        guild = SimpleNamespace(id=2, fetch_channels=AsyncMock(return_value=[category, child, other]),
+                                get_role=lambda _: role)
+        interaction = SimpleNamespace(guild=guild, response=SimpleNamespace(defer=AsyncMock()),
+                                      followup=SimpleNamespace(send=AsyncMock()))
+        return interaction, category, child, other, role
+
+    async def test_remove_ctf_exact_name_and_guild(self):
+        interaction, category, child, other, role = self.removal_interaction()
+        cog = CTFCommands(self.bot)
+        for name in ("HITCON2026", "hitcon", "hitcon2026 "):
+            with self.assertRaisesRegex(ValueError, "일치"):
+                await cog.remove_ctf.callback(cog, interaction, name)
+        interaction.guild.id = 999
+        with self.assertRaisesRegex(ValueError, "일치"):
+            await cog.remove_ctf.callback(cog, interaction, "hitcon2026")
+        interaction.guild.fetch_channels.assert_not_awaited()
+        category.delete.assert_not_awaited()
+        self.assertIsNotNone(self.bot.store.event(1))
+
+    async def test_remove_ctf_deletes_resources_and_preserves_other_ctfs(self):
+        interaction, category, child, other, role = self.removal_interaction()
+        self.bot.store.save_event(dict(id=8, guild=2, name="other"))
+        self.bot.store.save_challenge(dict(id=100, event=1))
+        self.bot.store.save_challenge(dict(id=101, event=8))
+        cog = CTFCommands(self.bot)
+        await cog.remove_ctf.callback(cog, interaction, "hitcon2026")
+        category.delete.assert_awaited_once()
+        child.delete.assert_awaited_once()
+        role.delete.assert_awaited_once()
+        other.delete.assert_not_awaited()
+        self.assertIsNone(self.bot.store.event(1))
+        self.assertIsNone(self.bot.store.challenge(100))
+        self.assertIsNotNone(self.bot.store.challenge(101))
+        interaction.followup.send.assert_awaited_once()
+
+    async def test_remove_ctf_partial_failure_can_be_retried(self):
+        interaction, category, child, other, role = self.removal_interaction()
+        child.delete.side_effect = discord.Forbidden(MagicMock(status=403, reason="Forbidden"), "denied")
+        cog = CTFCommands(self.bot)
+        with self.assertRaisesRegex(ValueError, "같은 /remove_ctf"):
+            await cog.remove_ctf.callback(cog, interaction, "hitcon2026")
+        self.assertTrue(self.bot.store.event(1)["removing"])
+        category.delete.assert_not_awaited()
+        role.delete.assert_not_awaited()
+        child.delete.side_effect = discord.NotFound(MagicMock(status=404, reason="Not Found"), "gone")
+        await cog.remove_ctf.callback(cog, interaction, "hitcon2026")
+        self.assertIsNone(self.bot.store.event(1))
+
+    async def test_remove_ctf_runtime_permission_check(self):
+        from discord import app_commands
+        command = CTFCommands(self.bot).remove_ctf
+        for allowed in (False, True):
+            interaction = SimpleNamespace(permissions=discord.Permissions(manage_guild=allowed))
+            if allowed:
+                self.assertTrue(command.checks[0](interaction))
+            else:
+                with self.assertRaises(app_commands.MissingPermissions):
+                    command.checks[0](interaction)
 
     async def test_join_then_leave_uses_fresh_member(self):
         role = SimpleNamespace(id=3)

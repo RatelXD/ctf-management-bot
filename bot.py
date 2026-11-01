@@ -76,6 +76,8 @@ class JoinView(discord.ui.View):
         event = self.bot.store.event(self.event_id)
         if not event or interaction.guild_id != event["guild"]:
             raise ValueError("이 서버의 대회 버튼이 아닙니다.")
+        if event.get("removing"):
+            raise ValueError("삭제 중인 대회입니다.")
         # Fetch a fresh member so double clicks cannot toggle using stale role data.
         async with self.bot.locks[("join", event["id"], interaction.user.id)]:
             member = await interaction.guild.fetch_member(interaction.user.id)
@@ -143,7 +145,7 @@ class CTFBot(commands.Bot):
                 view.stop()
         await self.remove_join_message(event)
 
-    async def remove_join_message(self, event):
+    async def remove_join_message(self, event, *, strict=False):
         if event.get("join_message"):
             try:
                 channel = self.get_channel(event["join"]) or await self.fetch_channel(event["join"])
@@ -151,6 +153,8 @@ class CTFBot(commands.Bot):
             except discord.NotFound:
                 pass
             except discord.HTTPException:
+                if strict:
+                    raise
                 log.warning("Could not remove join card for deleted CTF %s", event["id"])
 
     async def on_guild_channel_delete(self, channel):
@@ -220,6 +224,8 @@ class CTFBot(commands.Bot):
             except discord.NotFound:
                 await self.remove_event(event)
                 return
+        if event.get("removing"):
+            return
         await self.migrate_layout(guild, category, event)
         status = guild.get_channel(event["status"])
         join = guild.get_channel(event["join"])
@@ -269,6 +275,8 @@ class CTFBot(commands.Bot):
                 log.warning("CTF %s refresh failed; will retry", event_id)
                 self.dirty.add(event_id)
         for event in self.store.events():
+            if event.get("removing"):
+                continue
             for ch in self.store.challenges(event["id"]):
                 channel = self.get_channel(ch["id"])
                 desired = ("🚩-" if ch.get("solver") else "") + ch["name"]
@@ -292,6 +300,8 @@ class CTFCommands(commands.Cog):
         event = self.bot.store.event(channel.category_id)
         if not event or event["guild"] != interaction.guild_id:
             raise ValueError("먼저 /setup_ctf로 대회를 만들고 해당 카테고리에서 사용해 주세요.")
+        if event.get("removing"):
+            raise ValueError("삭제 중인 대회입니다. 관리자가 /remove_ctf를 다시 실행해 주세요.")
         member = interaction.user
         if not member.guild_permissions.manage_guild and not any(r.id == event["role"] for r in member.roles):
             raise ValueError("#ctf-join 버튼으로 먼저 참가해 주세요.")
@@ -322,6 +332,8 @@ class CTFCommands(commands.Cog):
                 async with self.bot.locks[("event", existing["id"])]:
                     if not self.bot.store.event(existing["id"]):
                         raise ValueError("삭제된 대회입니다. /setup_ctf를 다시 실행해 주세요.")
+                    if existing.get("removing"):
+                        raise ValueError("삭제 중인 대회입니다. /remove_ctf를 다시 실행해 주세요.")
                     existing.update(name=name, start=begin, end=finish, url=url)
                     self.bot.store.save_event(existing)
                     self.bot.dirty.add(existing["id"])
@@ -368,6 +380,61 @@ class CTFCommands(commands.Cog):
             self.bot.dirty.add(event["id"])
         await interaction.followup.send(f"대회를 만들었습니다. <#{join.id}>에 참가 버튼이 곧 표시됩니다.", ephemeral=True)
 
+    @app_commands.command(name="remove_ctf", description="이름이 일치하는 CTF의 채널·역할·기록을 삭제합니다 (관리자)")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(name="삭제할 대회 이름 (/setup_ctf에 입력한 이름과 정확히 일치)")
+    async def remove_ctf(self, interaction: discord.Interaction, name: app_commands.Range[str, 1, 80]):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        async with self.bot.locks[("setup", guild.id)]:
+            event = next((e for e in self.bot.store.events()
+                          if e["guild"] == guild.id and e["name"] == name), None)
+            if not event:
+                raise ValueError("이 서버에 이름이 정확히 일치하는 CTF가 없습니다.")
+            async with self.bot.locks[("event", event["id"])]:
+                event = self.bot.store.event(event["id"])
+                if not event:
+                    raise ValueError("이미 삭제된 대회입니다.")
+                # Preserve state on partial failure so the same command can finish deletion.
+                event["removing"] = True
+                self.bot.store.save_event(event)
+                for ch in self.bot.store.challenges(event["id"]):
+                    task = self.bot.rename_tasks.pop(ch["id"], None)
+                    if task:
+                        task.cancel()
+                try:
+                    channels = await guild.fetch_channels()
+                    for channel in channels:
+                        if getattr(channel, "category_id", None) == event["id"]:
+                            try:
+                                await channel.delete(reason="CTF removed by server manager")
+                            except discord.NotFound:
+                                pass
+                    await self.bot.remove_join_message(event, strict=True)
+                    role = guild.get_role(event["role"])
+                    if role:
+                        try:
+                            await role.delete(reason="CTF removed by server manager")
+                        except discord.NotFound:
+                            pass
+                    category = next((c for c in channels if c.id == event["id"]), None)
+                    if category:
+                        try:
+                            await category.delete(reason="CTF removed by server manager")
+                        except discord.NotFound:
+                            pass
+                except discord.HTTPException as error:
+                    raise ValueError("일부 항목을 삭제하지 못했습니다. 봇의 채널·역할 관리 권한과 역할 순서를 확인한 뒤 "
+                                     "같은 /remove_ctf name: 명령으로 삭제를 마쳐 주세요.") from error
+                await self.bot.remove_event(event)
+        try:
+            await interaction.followup.send(f"**{discord.utils.escape_markdown(name)}** CTF를 삭제했습니다.", ephemeral=True)
+        except discord.NotFound:
+            # The command may have been invoked in one of the deleted channels.
+            log.info("Removed CTF %s; interaction channel no longer exists", event["id"])
+
     @app_commands.command(name="edit_challenge", description="문제 채널 생성 또는 현재 문제의 이름·분야 수정")
     @app_commands.guild_only()
     @app_commands.describe(name="문제명", category="분야 (예: web, pwn, crypto)")
@@ -376,8 +443,11 @@ class CTFCommands(commands.Cog):
         event = self.context(interaction)
         await interaction.response.defer(ephemeral=True, thinking=True)
         async with self.bot.locks[("event", event["id"])]:
-            if not self.bot.store.event(event["id"]):
+            current = self.bot.store.event(event["id"])
+            if not current:
                 raise ValueError("삭제된 대회입니다.")
+            if current.get("removing"):
+                raise ValueError("삭제 중인 대회입니다.")
             ch = self.bot.store.challenge(interaction.channel_id)
             category = category or (ch.get("category", "") if ch else "")
             base = channel_name(f"{category}-{name}" if category else name)
