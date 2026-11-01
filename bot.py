@@ -12,13 +12,30 @@ from dotenv import load_dotenv
 from core import Store, board_pages, channel_name, event_details, set_status, solve, unsolve
 
 log = logging.getLogger("ctf")
-HELP = ("`/edit_ch name:문제명` → 문제 채널 생성 (문제 채널에서는 수정)\n"
+HELP = ("`/edit_challenge name:문제명` → 문제 채널 생성 (문제 채널에서는 수정)\n"
         "`/update_status status:working` → 🔨 푸는 중\n"
         "`/update_status status:stuck` → 🆘 막힘·도움 필요 SOS\n"
         "`/update_status status:stopped` → 그만둠\n"
-        "`/solve_ch flag:FLAG{...}` → 🚩 풀이 완료\n"
-        "`/unsolve_ch` → 풀이 취소\n\n"
-        "대회 사이트에서 먼저 정답 인증 후 /solve_ch를 사용하세요. 봇은 정답을 검증하지 않습니다.")
+        "`/solve_challenge flag:FLAG{...}` → 🚩 풀이 완료\n"
+        "`/unsolve_challenge` → 풀이 취소\n\n"
+        "대회 사이트에서 먼저 정답 인증 후 /solve_challenge를 사용하세요.\n봇은 정답을 검증하지 않습니다.")
+
+
+def dashboard_overwrites(guild, inherited):
+    overwrites = {target: discord.PermissionOverwrite.from_pair(*value.pair())
+                  for target, value in inherited.items()}
+    for target in set(overwrites) | {guild.default_role, guild.me} | {
+            role for role in guild.roles if role.permissions.manage_guild}:
+        overwrite = overwrites.setdefault(target, discord.PermissionOverwrite())
+        operator = target == guild.me or (
+            isinstance(target, discord.Role) and target.permissions.manage_guild)
+        overwrite.send_messages = operator
+        overwrite.send_messages_in_threads = operator
+        overwrite.create_public_threads = operator
+        overwrite.create_private_threads = operator
+        if operator:
+            overwrite.view_channel = True
+    return overwrites
 
 
 def info_embed(event):
@@ -111,6 +128,58 @@ class CTFBot(commands.Bot):
 
     async def on_ready(self):
         log.info("Ready as %s", self.user)
+        self.dirty.update(event["id"] for event in self.store.events())
+
+    async def remove_event(self, event):
+        """Called under the event lock; never delete remaining channels or roles."""
+        for ch in self.store.challenges(event["id"]):
+            task = self.rename_tasks.pop(ch["id"], None)
+            if task:
+                task.cancel()
+        self.store.delete_event(event["id"])
+        self.dirty.discard(event["id"])
+        for view in self.persistent_views:
+            if isinstance(view, JoinView) and view.event_id == event["id"]:
+                view.stop()
+        await self.remove_join_message(event)
+
+    async def remove_join_message(self, event):
+        if event.get("join_message"):
+            try:
+                channel = self.get_channel(event["join"]) or await self.fetch_channel(event["join"])
+                await channel.get_partial_message(event["join_message"]).delete()
+            except discord.NotFound:
+                pass
+            except discord.HTTPException:
+                log.warning("Could not remove join card for deleted CTF %s", event["id"])
+
+    async def on_guild_channel_delete(self, channel):
+        if not isinstance(channel, discord.CategoryChannel):
+            return
+        async with self.locks[("event", channel.id)]:
+            event = self.store.event(channel.id)
+            if event and event["guild"] == channel.guild.id:
+                await self.remove_event(event)
+
+    async def migrate_layout(self, guild, category, event):
+        if event.get("layout_version") == 1:
+            return
+        await category.edit(name=f"⚔️{event['name']}⚔️", reason="CTF layout update")
+        announcement = guild.get_channel(event["announcements"])
+        dashboard = guild.get_channel(event["status"])
+        if not isinstance(announcement, discord.TextChannel) or not isinstance(dashboard, discord.TextChannel):
+            raise ValueError("CTF 기본 채널이 삭제되었습니다.")
+        await announcement.edit(name="announcement", reason="CTF layout update")
+        await dashboard.edit(name="dashboard", topic=None,
+                             overwrites=dashboard_overwrites(guild, dashboard.overwrites),
+                             reason="CTF read-only dashboard")
+        general = guild.get_channel(event.get("general", 0))
+        if general is None:
+            general = next((c for c in category.text_channels if c.name == "general"), None)
+        if general is None:
+            general = await guild.create_text_channel("general", category=category)
+        event.update(general=general.id, layout_version=1)
+        self.store.save_event(event)
 
     async def sync_name(self, channel_id):
         # Discord may rate-limit channel renames for minutes. Keep them out of responses.
@@ -144,6 +213,14 @@ class CTFBot(commands.Bot):
         guild = self.get_guild(event["guild"])
         if not guild:
             return
+        category = guild.get_channel(event["id"])
+        if category is None:
+            try:
+                category = await guild.fetch_channel(event["id"])
+            except discord.NotFound:
+                await self.remove_event(event)
+                return
+        await self.migrate_layout(guild, category, event)
         status = guild.get_channel(event["status"])
         join = guild.get_channel(event["join"])
         announcements = guild.get_channel(event["announcements"])
@@ -243,6 +320,8 @@ class CTFCommands(commands.Cog):
             existing = next((e for e in self.bot.store.events() if e["guild"] == guild.id and e["slug"] == slug), None)
             if existing:
                 async with self.bot.locks[("event", existing["id"])]:
+                    if not self.bot.store.event(existing["id"]):
+                        raise ValueError("삭제된 대회입니다. /setup_ctf를 다시 실행해 주세요.")
                     existing.update(name=name, start=begin, end=finish, url=url)
                     self.bot.store.save_event(existing)
                     self.bot.dirty.add(existing["id"])
@@ -258,12 +337,14 @@ class CTFCommands(commands.Cog):
                     guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True,
                                                          read_message_history=True, embed_links=True),
                 }
-                category = await guild.create_category(f"{slug}-everyone", overwrites=overwrites)
+                category = await guild.create_category(f"⚔️{name}⚔️", overwrites=overwrites)
                 created.append(category)
-                announcements = await guild.create_text_channel("announcements", category=category)
+                announcements = await guild.create_text_channel("announcement", category=category)
                 created.append(announcements)
-                status = await guild.create_text_channel("status", category=category, topic=HELP[:1024])
+                status = await guild.create_text_channel("dashboard", category=category, overwrites=dashboard_overwrites(guild, category.overwrites))
                 created.append(status)
+                general = await guild.create_text_channel("general", category=category)
+                created.append(general)
                 join = next((c for c in guild.text_channels if c.name == "ctf-join" and c.category_id is None), None)
                 if join is None:
                     join = await guild.create_text_channel("ctf-join", overwrites={
@@ -273,7 +354,8 @@ class CTFCommands(commands.Cog):
                     })
                     created.append(join)
                 event = dict(id=category.id, guild=guild.id, slug=slug, name=name, start=begin, end=finish,
-                             url=url, role=role.id, status=status.id, announcements=announcements.id, join=join.id)
+                             url=url, role=role.id, status=status.id, announcements=announcements.id, join=join.id,
+                             general=general.id, layout_version=1)
                 self.bot.store.save_event(event)
             except Exception:
                 for resource in reversed(created):
@@ -286,16 +368,19 @@ class CTFCommands(commands.Cog):
             self.bot.dirty.add(event["id"])
         await interaction.followup.send(f"대회를 만들었습니다. <#{join.id}>에 참가 버튼이 곧 표시됩니다.", ephemeral=True)
 
-    @app_commands.command(name="edit_ch", description="문제 채널 생성 또는 현재 문제의 이름·분야·설명 수정")
+    @app_commands.command(name="edit_challenge", description="문제 채널 생성 또는 현재 문제의 이름·분야 수정")
     @app_commands.guild_only()
-    @app_commands.describe(name="문제명", category="분야 (예: web, pwn, crypto)", description="문제 설명")
-    async def edit_ch(self, interaction: discord.Interaction, name: app_commands.Range[str, 1, 96],
-                      category: app_commands.Range[str, 1, 40] = "", description: app_commands.Range[str, 1, 2000] = ""):
+    @app_commands.describe(name="문제명", category="분야 (예: web, pwn, crypto)")
+    async def edit_challenge(self, interaction: discord.Interaction, name: app_commands.Range[str, 1, 96],
+                      category: app_commands.Range[str, 1, 40] = ""):
         event = self.context(interaction)
-        base = channel_name(name)
         await interaction.response.defer(ephemeral=True, thinking=True)
         async with self.bot.locks[("event", event["id"])]:
+            if not self.bot.store.event(event["id"]):
+                raise ValueError("삭제된 대회입니다.")
             ch = self.bot.store.challenge(interaction.channel_id)
+            category = category or (ch.get("category", "") if ch else "")
+            base = channel_name(f"{category}-{name}" if category else name)
             if any(c["name"] == base and (not ch or c["id"] != ch["id"])
                    for c in self.bot.store.challenges(event["id"])):
                 raise ValueError("같은 이름의 문제가 이미 있습니다.")
@@ -303,7 +388,7 @@ class CTFCommands(commands.Cog):
                 parent = interaction.guild.get_channel(event["id"])
                 channel = await interaction.guild.create_text_channel(base, category=parent)
                 ch = dict(id=channel.id, event=event["id"], name=base, added_by=interaction.user.id,
-                          workers={}, solver=None, flag=None, category=category, description=description)
+                          workers={}, solver=None, flag=None, category=category)
                 self.bot.store.save_challenge(ch)
             else:
                 if ch["added_by"] != interaction.user.id and not interaction.user.guild_permissions.manage_guild:
@@ -312,15 +397,13 @@ class CTFCommands(commands.Cog):
                 ch["name"] = base
                 if category:
                     ch["category"] = category
-                if description:
-                    ch["description"] = description
                 self.bot.store.save_challenge(ch)
             self.bot.dirty.add(event["id"])
-            embed = discord.Embed(title=ch["name"], description=ch["description"] or None, color=0x3498DB)
+            embed = discord.Embed(title=ch["name"], description=ch.get("description") or None, color=0x3498DB)
             embed.add_field(name="Added by", value=f"<@{ch['added_by']}>")
             if ch["category"]:
                 embed.add_field(name="분야", value=ch["category"])
-            embed.set_footer(text="/update_status로 작업 상태 표시 · /solve_ch로 풀이 완료")
+            embed.set_footer(text="/update_status로 작업 상태 표시 · /solve_challenge로 풀이 완료")
             ch["info_message"] = await self.bot.upsert_message(channel, ch.get("info_message"), embed=embed)
             self.bot.store.save_challenge(ch)
         await interaction.followup.send(f"문제를 저장했습니다: {channel.mention}", ephemeral=True)
@@ -340,10 +423,10 @@ class CTFCommands(commands.Cog):
             self.bot.dirty.add(ch["event"])
         await interaction.followup.send(f"상태를 {status}(으)로 변경했습니다.", ephemeral=True)
 
-    @app_commands.command(name="solve_ch", description="대회 사이트에서 인증한 문제를 풀이 완료로 기록합니다")
+    @app_commands.command(name="solve_challenge", description="대회 사이트에서 인증한 문제를 풀이 완료로 기록합니다")
     @app_commands.guild_only()
     @app_commands.describe(flag="대회에서 정답 인증을 마친 플래그 (참가자에게 공개됩니다)")
-    async def solve_ch(self, interaction: discord.Interaction, flag: app_commands.Range[str, 1, 1000]):
+    async def solve_challenge(self, interaction: discord.Interaction, flag: app_commands.Range[str, 1, 1000]):
         self.challenge(interaction)
         await interaction.response.defer(ephemeral=True, thinking=True)
         async with self.bot.locks[("event", interaction.channel.category_id)]:
@@ -357,9 +440,9 @@ class CTFCommands(commands.Cog):
         await interaction.channel.send(embed=embed)
         await interaction.followup.send("🚩 풀이 완료로 기록했습니다. 상태판과 채널 이름을 갱신합니다.", ephemeral=True)
 
-    @app_commands.command(name="unsolve_ch", description="현재 문제의 풀이 완료를 취소합니다")
+    @app_commands.command(name="unsolve_challenge", description="현재 문제의 풀이 완료를 취소합니다")
     @app_commands.guild_only()
-    async def unsolve_ch(self, interaction: discord.Interaction):
+    async def unsolve_challenge(self, interaction: discord.Interaction):
         self.challenge(interaction)
         await interaction.response.defer(ephemeral=True, thinking=True)
         async with self.bot.locks[("event", interaction.channel.category_id)]:

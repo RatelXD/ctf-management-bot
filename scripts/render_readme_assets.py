@@ -68,7 +68,7 @@ def banner():
     c.text((64, 543), "Python  /  discord.py  /  SQLite", 18, "#8d96b7")
     c.box((718, 82, 1380, 555), "#0b0d18", 24, "#393d59")
     c.box((732, 96, 1366, 541), "#1b1e30", 16)
-    c.text((761, 116), "#  status", 23, bold=True)
+    c.text((761, 116), "#  dashboard", 23, bold=True)
     c.box((1220, 117, 1335, 147), "#173b32", 7)
     c.text((1235, 121), "MY CTF", 13, "#8fe8c6", True)
     c.line((756, 168, 1340, 168))
@@ -86,7 +86,7 @@ def banner():
     c.text((1031, 355), "working · @bob", 17, "#8fe8c6")
     c.text((790, 405), "# pwn-example", 19, "#d5d9ff", True)
     c.text((1031, 405), "SOS · @charlie", 17, "#ffb6c4")
-    c.text((761, 489), "/edit_ch   /update_status   /solve_ch", 18, "#9ca7d3")
+    c.text((761, 489), "/edit_challenge   /update_status   /solve_challenge", 13, "#9ca7d3")
     c.text((719, 578), "기능 예시 · 실제 Discord 화면을 캡처한 이미지가 아닙니다", 14, "#7e89af")
     c.save("banner.png")
 
@@ -98,8 +98,8 @@ def workflow():
     data = [
         ("01", "대회 설정", "/setup_ctf", "대회명 · 일정 · URL 입력", "#a4a1ff"),
         ("02", "참가하기", "JOIN / LEAVE", "버튼으로 카테고리 표시·숨김", "#a4a1ff"),
-        ("03", "문제 함께 풀기", "/edit_ch  /update_status", "문제 추가 · 작업자 · SOS 표시", "#82d7e9"),
-        ("04", "풀이 완료", "/solve_ch", "완료 알림 · 깃발 · 해결자 표시", "#8fe8c6"),
+        ("03", "문제 함께 풀기", "/edit_challenge  /update_status", "문제 추가 · 작업자 · SOS 표시", "#82d7e9"),
+        ("04", "풀이 완료", "/solve_challenge", "완료 알림 · 깃발 · 해결자 표시", "#8fe8c6"),
     ]
     for i, (num, title, command, subtitle, accent) in enumerate(data):
         x = 48 + i * 345

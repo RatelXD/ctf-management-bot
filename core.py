@@ -32,7 +32,7 @@ def event_details(start: str, end: str, url: str) -> tuple[int, int]:
 
 def set_status(ch: dict, user: int, status: str) -> None:
     if ch.get("solver"):
-        raise ValueError("이미 해결된 문제입니다. /unsolve_ch 후 상태를 변경해 주세요.")
+        raise ValueError("이미 해결된 문제입니다. /unsolve_challenge 후 상태를 변경해 주세요.")
     if status not in ("working", "stuck", "stopped"):
         raise ValueError("working, stuck, stopped 중에서 골라 주세요.")
     if status == "stopped":
@@ -75,7 +75,7 @@ def board_pages(event: dict, challenges: list[dict]) -> list[str]:
                 pages.append("\n".join(lines))
                 lines = []
             lines.append(piece)
-    pages.append("\n".join(lines) or "문제가 없습니다. /edit_ch name:문제명 으로 추가하세요.")
+    pages.append("\n".join(lines) or "문제가 없습니다. /edit_challenge name:문제명 으로 추가하세요.")
     return [(heading + "\n\n" + page) for page in pages]
 
 
@@ -110,3 +110,8 @@ class Store:
     def save_challenge(self, ch: dict):
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO challenges VALUES (?, ?, ?)", (ch["id"], ch["event"], json.dumps(ch)))
+
+    def delete_event(self, event: int):
+        with self.db:
+            self.db.execute("DELETE FROM challenges WHERE event=?", (event,))
+            self.db.execute("DELETE FROM events WHERE id=?", (event,))
