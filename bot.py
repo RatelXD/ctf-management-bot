@@ -21,6 +21,7 @@ def ctf_lookup_name(name):
 
 
 HELP = ("`/edit_challenge name:문제명` → 문제 채널 생성 (문제 채널에서는 수정)\n"
+        "`/edit_challenge category:pwn` → 현재 문제 채널의 분야만 수정\n"
         "`/update_status status:working` → 🔨 푸는 중\n"
         "`/update_status status:stuck` → 🆘 막힘·도움 필요 SOS\n"
         "`/update_status status:stopped` → 그만둠\n"
@@ -195,18 +196,25 @@ class CTFBot(commands.Bot):
         event.update(general=general.id, layout_version=2)
         self.store.save_event(event)
 
+    def queue_name_sync(self, channel_id):
+        prior = self.rename_tasks.get(channel_id)
+        if prior is None or prior.done():
+            self.rename_tasks[channel_id] = asyncio.create_task(self.sync_name(channel_id))
+
     async def sync_name(self, channel_id):
         # Discord may rate-limit channel renames for minutes. Keep them out of responses.
         try:
+            channel = self.get_channel(channel_id)
             while True:
                 ch = self.store.challenge(channel_id)
-                channel = self.get_channel(channel_id)
                 if not ch or not isinstance(channel, discord.TextChannel):
                     return
                 desired = ("🚩-" if ch.get("solver") else "") + ch["name"]
                 if channel.name == desired:
                     return
-                await channel.edit(name=desired, reason="CTF challenge status")
+                # edit() returns the updated channel; the gateway cache may still be stale.
+                # Re-read the stored state after the request in case solve was undone in flight.
+                channel = await channel.edit(name=desired, reason="CTF challenge status")
         except discord.HTTPException:
             ch = self.store.challenge(channel_id)
             if ch:
@@ -290,9 +298,8 @@ class CTFBot(commands.Bot):
             for ch in self.store.challenges(event["id"]):
                 channel = self.get_channel(ch["id"])
                 desired = ("🚩-" if ch.get("solver") else "") + ch["name"]
-                prior = self.rename_tasks.get(ch["id"])
-                if channel and channel.name != desired and (prior is None or prior.done()):
-                    self.rename_tasks[ch["id"]] = asyncio.create_task(self.sync_name(ch["id"]))
+                if channel and channel.name != desired:
+                    self.queue_name_sync(ch["id"])
 
     @refresh.before_loop
     async def before_refresh(self):
@@ -481,8 +488,8 @@ class CTFCommands(commands.Cog):
 
     @app_commands.command(name="edit_challenge", description="문제 채널 생성 또는 현재 문제의 이름·분야 수정")
     @app_commands.guild_only()
-    @app_commands.describe(name="문제명", category="분야 (예: web, pwn, crypto)")
-    async def edit_challenge(self, interaction: discord.Interaction, name: app_commands.Range[str, 1, 96],
+    @app_commands.describe(name="문제명 (새 문제 생성 시 필수, 현재 문제 수정 시 생략 가능)", category="분야 (예: web, pwn, crypto)")
+    async def edit_challenge(self, interaction: discord.Interaction, name: app_commands.Range[str, 1, 96] | None = None,
                       category: app_commands.Range[str, 1, 40] = ""):
         event = self.context(interaction)
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -493,8 +500,20 @@ class CTFCommands(commands.Cog):
             if current.get("removing"):
                 raise ValueError("삭제 중인 대회입니다.")
             ch = self.bot.store.challenge(interaction.channel_id)
+            if not ch and name is None:
+                raise ValueError("새 문제를 만들 때는 name을 입력해 주세요. category만 수정하는 것은 기존 문제 채널 안에서 가능합니다.")
+            if ch and name is None and not category:
+                raise ValueError("수정할 name 또는 category를 입력해 주세요.")
+            if name is None:
+                problem_name = ch.get("problem_name", ch["name"])
+                if "problem_name" not in ch and ch.get("category"):
+                    prefix = channel_name(ch["category"]) + "-"
+                    if problem_name.startswith(prefix):
+                        problem_name = problem_name[len(prefix):]
+            else:
+                problem_name = channel_name(name)
             category = category or (ch.get("category", "") if ch else "")
-            base = channel_name(f"{category}-{name}" if category else name)
+            base = channel_name(f"{category}-{problem_name}" if category else problem_name)
             if any(c["name"] == base and (not ch or c["id"] != ch["id"])
                    for c in self.bot.store.challenges(event["id"])):
                 raise ValueError("같은 이름의 문제가 이미 있습니다.")
@@ -502,17 +521,19 @@ class CTFCommands(commands.Cog):
                 parent = interaction.guild.get_channel(event["id"])
                 channel = await interaction.guild.create_text_channel(base, category=parent)
                 ch = dict(id=channel.id, event=event["id"], name=base, added_by=interaction.user.id,
-                          workers={}, solver=None, flag=None, category=category)
+                          workers={}, solver=None, flag=None, category=category, problem_name=problem_name)
                 self.bot.store.save_challenge(ch)
             else:
                 if ch["added_by"] != interaction.user.id and not interaction.user.guild_permissions.manage_guild:
                     raise ValueError("문제를 만든 사람 또는 서버 관리자만 수정할 수 있습니다.")
                 channel = interaction.channel
                 ch["name"] = base
+                ch["problem_name"] = problem_name
                 if category:
                     ch["category"] = category
                 self.bot.store.save_challenge(ch)
             self.bot.dirty.add(event["id"])
+            self.bot.queue_name_sync(ch["id"])
             embed = discord.Embed(title=ch["name"], description=ch.get("description") or None, color=0x3498DB)
             embed.add_field(name="Added by", value=f"<@{ch['added_by']}>")
             if ch["category"]:
@@ -548,6 +569,7 @@ class CTFCommands(commands.Cog):
             solve(ch, interaction.user.id, flag)
             self.bot.store.save_challenge(ch)
             self.bot.dirty.add(ch["event"])
+            self.bot.queue_name_sync(ch["id"])
         embed = discord.Embed(title="🚩 풀이 완료!", description=(
             f"<#{ch['id']}> · solved by <@{interaction.user.id}>\n\n"
             f"**Flag**\n{discord.utils.escape_markdown(flag)}"), color=0x2ECC71)
@@ -564,8 +586,10 @@ class CTFCommands(commands.Cog):
             unsolve(ch, interaction.user.id, interaction.user.guild_permissions.manage_guild)
             self.bot.store.save_challenge(ch)
             self.bot.dirty.add(ch["event"])
+            self.bot.queue_name_sync(ch["id"])
         await interaction.channel.send(f"↩️ <@{interaction.user.id}>님이 <#{ch['id']}>의 풀이 완료를 취소했습니다.")
-        await interaction.followup.send("풀이를 취소했습니다. 다시 /update_status로 작업자를 등록할 수 있습니다.", ephemeral=True)
+        await interaction.followup.send("풀이를 취소했습니다. 채널명의 🚩- 제거를 요청했습니다. Discord 이름 변경 제한 중에는 반영이 늦어질 수 있습니다. "
+                                        "다시 /update_status로 작업자를 등록할 수 있습니다.", ephemeral=True)
 
 
 def main():

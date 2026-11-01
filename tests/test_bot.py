@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -23,6 +24,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(commands), {"setup_ctf", "remove_ctf", "edit_challenge", "update_status", "solve_challenge", "unsolve_challenge"})
         self.assertEqual(commands["edit_challenge"].parameters[0].name, "name")
         self.assertEqual([p.name for p in commands["edit_challenge"].parameters], ["name", "category"])
+        self.assertFalse(commands["edit_challenge"].parameters[0].required)
         self.assertTrue(commands["solve_challenge"].parameters[0].required)
         self.assertTrue(commands["remove_ctf"].default_permissions.manage_guild)
         self.assertEqual([p.name for p in commands["remove_ctf"].parameters], ["name"])
@@ -381,6 +383,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         channel.name = "web-demo"
         async def rename(**kwargs):
             channel.name = kwargs["name"]
+            return channel
         channel.edit = AsyncMock(side_effect=rename)
         self.bot.get_channel = lambda _: channel
         await self.bot.sync_name(100)
@@ -389,6 +392,76 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.bot.store.save_challenge(ch)
         await self.bot.sync_name(100)
         self.assertEqual(channel.name, "web-demo")
+
+    async def test_name_sync_does_not_repeat_edits_against_stale_gateway_cache(self):
+        self.bot.store.save_challenge(dict(id=100, event=1, name="pwn-runner", solver=None))
+        stale = MagicMock(spec=discord.TextChannel)
+        stale.name = "🚩-pwn-runner"
+        updated = MagicMock(spec=discord.TextChannel)
+        updated.name = "pwn-runner"
+        stale.edit = AsyncMock(return_value=updated)
+        self.bot.get_channel = lambda _: stale
+        await self.bot.sync_name(100)
+        stale.edit.assert_awaited_once_with(name="pwn-runner", reason="CTF challenge status")
+        updated.edit.assert_not_called()
+
+    async def test_unsolve_during_inflight_solve_rename_removes_flag(self):
+        ch = dict(id=100, event=1, name="runner", solver=10)
+        self.bot.store.save_challenge(ch)
+        started, release = asyncio.Event(), asyncio.Event()
+        stale = MagicMock(spec=discord.TextChannel)
+        stale.name = "runner"
+        flagged = MagicMock(spec=discord.TextChannel)
+        flagged.name = "🚩-runner"
+        restored = MagicMock(spec=discord.TextChannel)
+        restored.name = "runner"
+        async def solve_rename(**kwargs):
+            started.set()
+            await release.wait()
+            return flagged
+        stale.edit = AsyncMock(side_effect=solve_rename)
+        flagged.edit = AsyncMock(return_value=restored)
+        self.bot.get_channel = lambda _: stale
+        self.bot.queue_name_sync(100)
+        await started.wait()
+        ch["solver"] = None
+        self.bot.store.save_challenge(ch)
+        prior = self.bot.rename_tasks[100]
+        self.bot.queue_name_sync(100)
+        self.assertIs(self.bot.rename_tasks[100], prior)
+        release.set()
+        await prior
+        flagged.edit.assert_awaited_once_with(name="runner", reason="CTF challenge status")
+
+    async def test_edit_category_only_inside_existing_problem(self):
+        interaction, *_ = self.removal_interaction()
+        channel = MagicMock(spec=discord.TextChannel)
+        channel.id, channel.category_id, channel.mention = 100, 1, "<#100>"
+        interaction.channel, interaction.channel_id, interaction.guild_id = channel, 100, 2
+        interaction.user = SimpleNamespace(id=10, guild_permissions=discord.Permissions.none(),
+                                           roles=[SimpleNamespace(id=3)])
+        self.bot.upsert_message = AsyncMock(return_value=500)
+        self.bot.store.save_challenge(dict(id=100, event=1, name="runner", category="", added_by=10,
+                                           solver=None, workers={}))
+        cog = CTFCommands(self.bot)
+        await cog.edit_challenge.callback(cog, interaction, category="pwn")
+        self.assertEqual(self.bot.store.challenge(100)["name"], "pwn-runner")
+        await cog.edit_challenge.callback(cog, interaction, category="web")
+        self.assertEqual(self.bot.store.challenge(100)["name"], "web-runner")
+        self.assertEqual(self.bot.store.challenge(100)["added_by"], 10)
+        # Legacy categorized records have no separate problem_name field.
+        ch = self.bot.store.challenge(100)
+        ch.pop("problem_name")
+        self.bot.store.save_challenge(ch)
+        await cog.edit_challenge.callback(cog, interaction, category="crypto")
+        self.assertEqual(self.bot.store.challenge(100)["name"], "crypto-runner")
+        interaction.channel_id = 4
+        with self.assertRaisesRegex(ValueError, "name"):
+            await cog.edit_challenge.callback(cog, interaction, category="web")
+        interaction.channel_id = 100
+        interaction.user.id = 20
+        with self.assertRaisesRegex(ValueError, "관리자"):
+            await cog.edit_challenge.callback(cog, interaction, category="web")
 
 
 if __name__ == "__main__":
