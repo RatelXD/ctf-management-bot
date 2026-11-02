@@ -5,6 +5,7 @@ import os
 import unicodedata
 from collections import defaultdict
 from difflib import SequenceMatcher
+from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
@@ -223,6 +224,11 @@ class CTFBot(commands.Bot):
         if prior is None or prior.done():
             self.rename_tasks[channel_id] = asyncio.create_task(self.sync_name(channel_id))
 
+    async def sync_event_role(self, guild, category_name, event):
+        role = guild.get_role(event["role"])
+        if role and role.name != category_name:
+            await role.edit(name=category_name, reason="Match CTF category name")
+
     async def sync_name(self, channel_id):
         # Discord may rate-limit channel renames for minutes. Keep them out of responses.
         try:
@@ -267,7 +273,9 @@ class CTFBot(commands.Bot):
         if event.get("removing"):
             return
         await self.prune_missing_challenges(guild, event)
+        role_name = f"⚔️{event['name']}⚔️" if event.get("layout_version") != 2 else category.name
         await self.migrate_layout(guild, category, event)
+        await self.sync_event_role(guild, role_name, event)
         status = guild.get_channel(event["status"])
         join = guild.get_channel(event["join"])
         announcements = guild.get_channel(event["announcements"])
@@ -339,7 +347,7 @@ class CTFCommands(commands.Cog):
                 category = guild.get_channel(event["id"])
                 yield event, category.name if category else f"⚔️{event['name']}⚔️"
 
-    def resolve_removal(self, guild, name):
+    def resolve_removal(self, guild, name, *, allow_missing=False):
         candidates = list(self.removal_candidates(guild))
         if name.startswith("ctf:"):
             matches = [event for event, _ in candidates if name == f"ctf:{event['id']}"]
@@ -350,8 +358,10 @@ class CTFCommands(commands.Cog):
                 matches = [event for event, label in candidates
                            if query in (ctf_lookup_name(event["name"]), ctf_lookup_name(label))]
         if len(matches) > 1:
-            raise ValueError("이름이 같은 CTF가 여러 개입니다. name 자동완성 목록에서 삭제할 대회를 선택해 주세요.")
+            raise ValueError("이름이 같은 CTF가 여러 개입니다. name 자동완성 목록에서 대회를 선택해 주세요.")
         if not matches:
+            if allow_missing and not name.startswith("ctf:"):
+                return None
             raise ValueError("이 서버에 이름이 일치하는 CTF가 없습니다. name 자동완성 목록에서 선택해 주세요.")
         return matches[0]
 
@@ -380,30 +390,46 @@ class CTFCommands(commands.Cog):
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.describe(name="대회 이름 (예: hitcon2026)", start="2026-11-01T20:00+09:00",
-                           end="2026-11-03T20:00+09:00", url="대회 사이트 URL")
-    async def setup_ctf(self, interaction: discord.Interaction, name: app_commands.Range[str, 1, 80],
-                        start: str, end: str, url: str):
-        begin, finish = event_details(start, end, url)
-        slug = channel_name(name)
+    @app_commands.describe(name="새 대회 이름 또는 수정할 대회 선택", start="시작: 2026-11-01T20:00+09:00 (수정 시 생략 가능)",
+                           end="종료: 2026-11-03T20:00+09:00 (수정 시 생략 가능)", url="대회 사이트 URL (수정 시 생략 가능)")
+    async def setup_ctf(self, interaction: discord.Interaction, name: app_commands.Range[str, 1, 100],
+                        start: str | None = None, end: str | None = None, url: str | None = None):
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
         async with self.bot.locks[("setup", guild.id)]:
-            existing = next((e for e in self.bot.store.events() if e["guild"] == guild.id and e["slug"] == slug), None)
+            existing = self.resolve_removal(guild, name, allow_missing=True)
+            if existing is None:
+                slug = channel_name(name)
+                existing = next((e for e in self.bot.store.events()
+                                 if e["guild"] == guild.id and e["slug"] == slug), None)
             if existing:
                 async with self.bot.locks[("event", existing["id"])]:
-                    if not self.bot.store.event(existing["id"]):
+                    existing = self.bot.store.event(existing["id"])
+                    if not existing:
                         raise ValueError("삭제된 대회입니다. /setup_ctf를 다시 실행해 주세요.")
                     if existing.get("removing"):
                         raise ValueError("삭제 중인 대회입니다. /remove_ctf를 다시 실행해 주세요.")
-                    existing.update(name=name, start=begin, end=finish, url=url)
+                    if all(value is None for value in (start, end, url)):
+                        raise ValueError("수정할 start, end, url 중 하나를 입력해 주세요.")
+                    begin, finish = event_details(
+                        start if start is not None else datetime.fromtimestamp(existing["start"], timezone.utc).isoformat(),
+                        end if end is not None else datetime.fromtimestamp(existing["end"], timezone.utc).isoformat(),
+                        url if url is not None else existing["url"])
+                    existing.update(start=begin, end=finish, url=url if url is not None else existing["url"])
                     self.bot.store.save_event(existing)
                     self.bot.dirty.add(existing["id"])
                 await interaction.followup.send("대회 정보를 수정했습니다.", ephemeral=True)
                 return
+            if any(value is None for value in (start, end, url)):
+                raise ValueError("새 대회를 만들 때는 start, end, url을 모두 입력해 주세요. 기존 대회 수정은 name 자동완성에서 선택하세요.")
+            name = name.strip()
+            if len(name) > 80:
+                raise ValueError("새 대회 이름은 80자 이하로 입력해 주세요.")
+            slug = channel_name(name)
+            begin, finish = event_details(start, end, url)
             created = []
             try:
-                role = await guild.create_role(name=f"CTF-{slug}", reason="CTF participants")
+                role = await guild.create_role(name=f"⚔️{name}⚔️", reason="CTF participants")
                 created.append(role)
                 overwrites = {
                     guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -441,6 +467,10 @@ class CTFCommands(commands.Cog):
             self.bot.add_view(JoinView(self.bot, event))
             self.bot.dirty.add(event["id"])
         await interaction.followup.send(f"대회를 만들었습니다. <#{join.id}>에 참가 버튼이 곧 표시됩니다.", ephemeral=True)
+
+    @setup_ctf.autocomplete("name")
+    async def setup_ctf_name_autocomplete(self, interaction: discord.Interaction, current: str):
+        return await self.remove_ctf_name_autocomplete(interaction, current)
 
     @app_commands.command(name="remove_ctf", description="이름이 일치하는 CTF의 채널·역할·기록을 삭제합니다 (관리자)")
     @app_commands.guild_only()

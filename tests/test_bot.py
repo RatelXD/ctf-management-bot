@@ -29,7 +29,8 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(commands["remove_ctf"].default_permissions.manage_guild)
         self.assertEqual([p.name for p in commands["remove_ctf"].parameters], ["name"])
         self.assertTrue(commands["remove_ctf"].parameters[0].autocomplete)
-        self.assertFalse(commands["setup_ctf"].parameters[0].autocomplete)
+        self.assertTrue(commands["setup_ctf"].parameters[0].autocomplete)
+        self.assertEqual([p.required for p in commands["setup_ctf"].parameters], [True, False, False, False])
         self.assertEqual([c.value for c in commands["update_status"].parameters[0].choices],
                          ["working", "stuck", "stopped"])
         for command in commands.values():
@@ -233,6 +234,56 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(app_commands.MissingPermissions):
                     command.checks[0](interaction)
 
+    async def test_setup_ctf_updates_only_supplied_fields(self):
+        interaction, *_ = self.removal_interaction()
+        cog = CTFCommands(self.bot)
+        original = self.bot.store.event(1)
+        await cog.setup_ctf.callback(cog, interaction, "⚔️hitcon2026⚔️", url="https://new.example.com")
+        updated = self.bot.store.event(1)
+        self.assertEqual(updated["url"], "https://new.example.com")
+        for field in ("id", "name", "role", "slug", "start", "end"):
+            self.assertEqual(updated[field], original[field])
+        await cog.setup_ctf.callback(cog, interaction, "ctf:1", end="2026-12-01T20:00+09:00")
+        self.assertGreater(self.bot.store.event(1)["end"], original["end"])
+        await cog.setup_ctf.callback(cog, interaction, "HITCON2026", start="2026-10-01T20:00+09:00")
+        self.assertLess(self.bot.store.event(1)["start"], original["start"])
+        self.assertEqual(len(self.bot.store.events()), 1)
+        self.assertIn(1, self.bot.dirty)
+
+    async def test_setup_ctf_rejects_invalid_partial_updates_without_saving(self):
+        interaction, *_ = self.removal_interaction()
+        cog = CTFCommands(self.bot)
+        original = self.bot.store.event(1)
+        for options in ({}, {"url": "bad"}, {"end": "2020-01-01T00:00+09:00"},
+                        {"start": "2099-01-01T00:00+09:00"}, {"url": ""}):
+            with self.assertRaises(ValueError):
+                await cog.setup_ctf.callback(cog, interaction, "hitcon2026", **options)
+            self.assertEqual(self.bot.store.event(1), original)
+        with self.assertRaisesRegex(ValueError, "모두"):
+            await cog.setup_ctf.callback(cog, interaction, "new-ctf", url="https://example.com")
+        self.assertEqual(len(self.bot.store.events()), 1)
+
+    async def test_setup_ctf_autocomplete_is_scoped_and_can_select_existing(self):
+        interaction, *_ = self.removal_interaction()
+        interaction.permissions = discord.Permissions(manage_guild=True)
+        self.bot.store.save_event(dict(id=8, guild=999, name="hitcon-other"))
+        cog = CTFCommands(self.bot)
+        choices = await cog.setup_ctf_name_autocomplete(interaction, "hitcn")
+        self.assertEqual([c.value for c in choices], ["ctf:1"])
+        await cog.setup_ctf.callback(cog, interaction, choices[0].value, url="https://new.example.com")
+        interaction.permissions = discord.Permissions.none()
+        self.assertEqual(await cog.setup_ctf_name_autocomplete(interaction, ""), [])
+
+    async def test_existing_role_is_renamed_without_replacing_it(self):
+        role = SimpleNamespace(id=3, name="CTF-hitcon2026", edit=AsyncMock())
+        guild = SimpleNamespace(get_role=lambda _: role)
+        await self.bot.sync_event_role(guild, "⚔️hitcon2026⚔️", self.event)
+        role.edit.assert_awaited_once_with(name="⚔️hitcon2026⚔️", reason="Match CTF category name")
+        self.assertEqual(self.bot.store.event(1)["role"], 3)
+        role.name = "⚔️hitcon2026⚔️"
+        await self.bot.sync_event_role(guild, "⚔️hitcon2026⚔️", self.event)
+        role.edit.assert_awaited_once()
+
     async def test_join_then_leave_uses_fresh_member(self):
         role = SimpleNamespace(id=3)
         member = SimpleNamespace(roles=[], add_roles=AsyncMock(), remove_roles=AsyncMock())
@@ -357,7 +408,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         next_id = iter(range(20, 30))
         async def create_text(name, **kwargs):
             return SimpleNamespace(id=next(next_id), name=name)
-        guild = SimpleNamespace(id=2, roles=[everyone, participant], default_role=everyone,
+        guild = SimpleNamespace(id=2, get_channel=lambda _: None, roles=[everyone, participant], default_role=everyone,
             me=bot_member, text_channels=[], create_role=AsyncMock(return_value=participant),
             create_category=AsyncMock(side_effect=create_category),
             create_text_channel=AsyncMock(side_effect=create_text))
@@ -367,6 +418,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await cog.setup_ctf.callback(cog, interaction, "My CTF", "2026-11-01T20:00+09:00",
                                      "2026-11-03T20:00+09:00", "https://example.com")
         self.assertEqual(guild.create_category.call_args.args[0], "⚔️My CTF⚔️")
+        self.assertEqual(guild.create_role.call_args.kwargs["name"], "⚔️My CTF⚔️")
         calls = guild.create_text_channel.call_args_list
         self.assertEqual([call.args[0] for call in calls],
                          ["📢│announcements", "📊│dashboard", "💬│general", "ctf-join"])
