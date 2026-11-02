@@ -282,7 +282,7 @@ class CTFBot(commands.Bot):
         if not all(isinstance(c, discord.TextChannel) for c in (status, join, announcements)):
             raise ValueError("CTF 기본 채널이 삭제되었습니다.")
         embed = info_embed(event)
-        embed.description = "버튼을 누르면 참가하고, 다시 누르면 떠납니다."
+        embed.description = "Click the button to join. Click again to leave."
         event["join_message"] = await self.upsert_message(
             join, event.get("join_message"), embed=embed, view=JoinView(self, event))
         self.store.save_event(event)
